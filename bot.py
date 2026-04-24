@@ -2,6 +2,7 @@ import vk_api
 import time
 import sys
 import random
+import json
 
 import colorama
 colorama.init()
@@ -260,8 +261,6 @@ def поставить_лайки_на_странице_пользователя
     except Exception as e:
         print(f"Ошибка при разрешении пользователя: {e}")
 
-# -- Весь предыдущий код --
-
 def убрать_лайки_с_группы():
     print_box("Убрать лайки с постов группы", [])
     try:
@@ -330,7 +329,186 @@ def убрать_лайки_с_страницы_пользователя():
     except Exception as e:
         print(f"Ошибка: {e}")
 
-# Обновляем меню и цикл
+# ---------- НОВЫЕ ФУНКЦИИ ДЛЯ ЭКСПОРТА ----------
+def получить_список_диалогов():
+    """Получает первые 200 диалогов и возвращает список с информацией для выбора."""
+    try:
+        convs = vk.messages.getConversations(count=200, extended=1)
+        items = convs.get('items', [])
+        profiles = convs.get('profiles', [])
+        groups = convs.get('groups', [])
+        if not items:
+            return []
+
+        profiles_dict = {p['id']: p for p in profiles}
+        groups_dict = {g['id']: g for g in groups}
+
+        dialog_list = []
+        for idx, item in enumerate(items, 1):
+            conversation = item.get('conversation', {})
+            peer = conversation.get('peer', {})
+            peer_id = peer.get('id')
+            if peer_id is None:
+                continue  # пропускаем диалоги без peer_id
+
+            conv_type = peer.get('type')
+            title = ""
+
+            if conv_type == 'user':
+                user = profiles_dict.get(peer_id, {})
+                title = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+                if not title:
+                    title = f"Пользователь {peer_id}"
+            elif conv_type == 'chat':
+                chat_settings = conversation.get('chat_settings', {})
+                title = chat_settings.get('title', f"Беседа {peer_id}")
+            else:
+                title = f"Диалог {peer_id}"
+
+            dialog_list.append({
+                'number': idx,
+                'peer_id': peer_id,
+                'title': title,
+                'type': conv_type
+            })
+        return dialog_list
+    except Exception as e:
+        print(f"Ошибка при получении списка диалогов: {e}")
+        return []
+
+def экспортировать_чат_полностью(peer_id, title):
+    """Выгружает все сообщения из диалога peer_id и сохраняет в JSON."""
+    print_box("Экспорт чата", [f"Выгружаем все сообщения из диалога: {title}"])
+    all_messages = []
+    offset = 0
+    count_per_request = 200
+    retrieved = 0
+
+    try:
+        while True:
+            history = vk.messages.getHistory(
+                peer_id=peer_id,
+                count=count_per_request,
+                offset=offset,
+                extended=1
+            )
+            items = history.get('items', [])
+            if not items:
+                break
+
+            # Подготовка данных об отправителях
+            profiles = history.get('profiles', [])
+            profiles_dict = {p['id']: p for p in profiles}
+
+            for msg in items:
+                msg_copy = {
+                    'id': msg['id'],
+                    'date': msg['date'],
+                    'text': msg.get('text', ''),
+                    'from_id': msg['from_id'],
+                    'peer_id': msg['peer_id'],
+                    'attachments': []
+                }
+                # Информация об отправителе
+                sender = profiles_dict.get(msg['from_id'])
+                if sender:
+                    msg_copy['from_name'] = f"{sender['first_name']} {sender['last_name']}"
+                    msg_copy['from_link'] = f"https://vk.com/id{sender['id']}"
+                else:
+                    msg_copy['from_name'] = f"User {msg['from_id']}"
+                    msg_copy['from_link'] = ""
+
+                # Вложения (кратко)
+                if 'attachments' in msg:
+                    for att in msg['attachments']:
+                        att_type = att['type']
+                        att_info = {'type': att_type}
+                        if att_type == 'photo':
+                            sizes = att['photo'].get('sizes', [])
+                            if sizes:
+                                att_info['url'] = sizes[-1]['url']
+                        elif att_type == 'video':
+                            att_info['title'] = att['video'].get('title', '')
+                            att_info['url'] = f"https://vk.com/video{att['video']['owner_id']}_{att['video']['id']}"
+                        elif att_type == 'audio':
+                            att_info['title'] = f"{att['audio'].get('artist', '')} - {att['audio'].get('title', '')}"
+                        elif att_type == 'doc':
+                            att_info['title'] = att['doc'].get('title', '')
+                            att_info['url'] = att['doc'].get('url', '')
+                        elif att_type == 'link':
+                            att_info['url'] = att['link'].get('url', '')
+                        msg_copy['attachments'].append(att_info)
+
+                all_messages.append(msg_copy)
+
+            retrieved += len(items)
+            offset += len(items)
+            print(f"Загружено {retrieved} сообщений...")
+            time.sleep(0.34)  # задержка для соблюдения лимитов API
+
+            # Если получено меньше, чем запрошено, значит сообщения закончились
+            if len(items) < count_per_request:
+                break
+
+        if not all_messages:
+            print("Сообщений не найдено.")
+            return
+
+        # Формируем имя файла
+        safe_title = title.replace('/', '_').replace('\\', '_').replace(':', '_')
+        filename = f"chat_export_{peer_id}_{safe_title}_{time.strftime('%Y%m%d_%H%M%S')}.json"
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump({
+                'peer_id': peer_id,
+                'title': title,
+                'export_date': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'total_messages': len(all_messages),
+                'messages': all_messages
+            }, f, ensure_ascii=False, indent=2)
+
+        print_box("Готово", [f"Экспорт завершён. Сохранено {len(all_messages)} сообщений в файл:", filename])
+    except vk_api.exceptions.ApiError as e:
+        print(f"Ошибка API при получении сообщений: {e}")
+    except Exception as e:
+        print(f"Неожиданная ошибка при экспорте: {e}")
+
+def экспорт_чата_интерактивный():
+    """Показывает список диалогов, даёт выбрать и экспортирует полностью."""
+    print_box("Экспорт чата", ["Получение списка диалогов..."])
+    dialogs = получить_список_диалогов()
+    if not dialogs:
+        print("Нет доступных диалогов. Возврат в меню.")
+        return
+
+    # Вывод списка
+    print("Ваши диалоги:")
+    for d in dialogs:
+        print(f"{d['number']}. {d['title']} (peer_id: {d['peer_id']})")
+
+    # Выбор
+    while True:
+        try:
+            choice = input("Введите номер диалога для экспорта (или 0 для отмены): ").strip()
+            if choice == '0':
+                print("Отмена.")
+                return
+            idx = int(choice) - 1
+            if 0 <= idx < len(dialogs):
+                selected = dialogs[idx]
+                break
+            else:
+                print("Неверный номер. Попробуйте снова.")
+        except ValueError:
+            print("Введите число.")
+
+    # Подтверждение и экспорт
+    if подтвердить_выполнение(f"Экспортировать чат '{selected['title']}' (все сообщения)"):
+        экспортировать_чат_полностью(selected['peer_id'], selected['title'])
+    else:
+        print_box("Отмена", ["Операция отменена."])
+
+# ---------- КОНЕЦ НОВЫХ ФУНКЦИЙ ----------
+
 def главное_меню():
     print("Что вы хотите сделать?")
     print("1 - Удалить исходящие заявки")
@@ -341,8 +519,9 @@ def главное_меню():
     print("6 - Поставить лайки на странице пользователя")
     print("7 - Убрать лайки с постов группы")
     print("8 - Убрать лайки с постов пользователя")
+    print("9 - Экспортировать чат в JSON")
     print("0 - Выход")
-    choice = input("Введите число (0-8): ").strip()
+    choice = input("Введите число (0-9): ").strip()
     return choice
 
 # Цикл
@@ -389,6 +568,8 @@ while True:
                 убрать_лайки_с_страницы_пользователя()
             else:
                 print_box("Отмена", ["Операция отменена."])
+        elif choice == '9':
+            экспорт_чата_интерактивный()
         elif choice == '0':
             print("Выход. До свидания.")
             break
