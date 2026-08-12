@@ -3,6 +3,7 @@ import time
 import sys
 import random
 import json
+import datetime  # добавлено для работы с датами
 
 import colorama
 colorama.init()
@@ -302,7 +303,7 @@ def убрать_лайки_с_страницы_пользователя():
         print("Не введено. Возврат к меню.")
         return
     if 'vk.com/' in user_input:
-        sname = user_input.split('vk.com/')[-1].split('?')[0]
+        sname = user_input.split('vk.com/')[-1]. split('?')[0]
     else:
         sname = user_input
     try:
@@ -329,7 +330,7 @@ def убрать_лайки_с_страницы_пользователя():
     except Exception as e:
         print(f"Ошибка: {e}")
 
-# ---------- НОВЫЕ ФУНКЦИИ ДЛЯ ЭКСПОРТА ----------
+# ---------- ФУНКЦИИ ДЛЯ ЭКСПОРТА ЧАТА (с выбором периода) ----------
 def получить_список_диалогов():
     """Получает первые 200 диалогов и возвращает список с информацией для выбора."""
     try:
@@ -349,7 +350,7 @@ def получить_список_диалогов():
             peer = conversation.get('peer', {})
             peer_id = peer.get('id')
             if peer_id is None:
-                continue  # пропускаем диалоги без peer_id
+                continue
 
             conv_type = peer.get('type')
             title = ""
@@ -376,16 +377,27 @@ def получить_список_диалогов():
         print(f"Ошибка при получении списка диалогов: {e}")
         return []
 
-def экспортировать_чат_полностью(peer_id, title):
-    """Выгружает все сообщения из диалога peer_id и сохраняет в JSON."""
-    print_box("Экспорт чата", [f"Выгружаем все сообщения из диалога: {title}"])
+def экспортировать_чат_полностью(peer_id, title, days_limit=None):
+    """
+    Выгружает сообщения из диалога peer_id.
+    days_limit: количество дней от текущего момента (None – всё время)
+    """
+    if days_limit is not None:
+        start_timestamp = int(time.time()) - days_limit * 86400
+        period_str = f"за последние {days_limit} дней"
+    else:
+        start_timestamp = None
+        period_str = "за всё время"
+
+    print_box("Экспорт чата", [f"Выгружаем сообщения из диалога: {title} ({period_str})"])
     all_messages = []
     offset = 0
     count_per_request = 200
     retrieved = 0
+    stop_loading = False
 
     try:
-        while True:
+        while not stop_loading:
             history = vk.messages.getHistory(
                 peer_id=peer_id,
                 count=count_per_request,
@@ -396,11 +408,15 @@ def экспортировать_чат_полностью(peer_id, title):
             if not items:
                 break
 
-            # Подготовка данных об отправителях
             profiles = history.get('profiles', [])
             profiles_dict = {p['id']: p for p in profiles}
 
             for msg in items:
+                msg_date = msg['date']
+                if start_timestamp is not None and msg_date < start_timestamp:
+                    stop_loading = True
+                    break
+
                 msg_copy = {
                     'id': msg['id'],
                     'date': msg['date'],
@@ -409,7 +425,6 @@ def экспортировать_чат_полностью(peer_id, title):
                     'peer_id': msg['peer_id'],
                     'attachments': []
                 }
-                # Информация об отправителе
                 sender = profiles_dict.get(msg['from_id'])
                 if sender:
                     msg_copy['from_name'] = f"{sender['first_name']} {sender['last_name']}"
@@ -418,7 +433,6 @@ def экспортировать_чат_полностью(peer_id, title):
                     msg_copy['from_name'] = f"User {msg['from_id']}"
                     msg_copy['from_link'] = ""
 
-                # Вложения (кратко)
                 if 'attachments' in msg:
                     for att in msg['attachments']:
                         att_type = att['type']
@@ -444,17 +458,17 @@ def экспортировать_чат_полностью(peer_id, title):
             retrieved += len(items)
             offset += len(items)
             print(f"Загружено {retrieved} сообщений...")
-            time.sleep(0.34)  # задержка для соблюдения лимитов API
+            time.sleep(0.34)
 
-            # Если получено меньше, чем запрошено, значит сообщения закончились
             if len(items) < count_per_request:
+                break
+            if stop_loading:
                 break
 
         if not all_messages:
-            print("Сообщений не найдено.")
+            print("Сообщений за указанный период не найдено.")
             return
 
-        # Формируем имя файла
         safe_title = title.replace('/', '_').replace('\\', '_').replace(':', '_')
         filename = f"chat_export_{peer_id}_{safe_title}_{time.strftime('%Y%m%d_%H%M%S')}.json"
         with open(filename, 'w', encoding='utf-8') as f:
@@ -462,6 +476,7 @@ def экспортировать_чат_полностью(peer_id, title):
                 'peer_id': peer_id,
                 'title': title,
                 'export_date': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'period_days': days_limit,
                 'total_messages': len(all_messages),
                 'messages': all_messages
             }, f, ensure_ascii=False, indent=2)
@@ -473,19 +488,18 @@ def экспортировать_чат_полностью(peer_id, title):
         print(f"Неожиданная ошибка при экспорте: {e}")
 
 def экспорт_чата_интерактивный():
-    """Показывает список диалогов, даёт выбрать и экспортирует полностью."""
+    """Показывает список диалогов, даёт выбрать период и экспортирует."""
     print_box("Экспорт чата", ["Получение списка диалогов..."])
     dialogs = получить_список_диалогов()
     if not dialogs:
         print("Нет доступных диалогов. Возврат в меню.")
         return
 
-    # Вывод списка
     print("Ваши диалоги:")
     for d in dialogs:
         print(f"{d['number']}. {d['title']} (peer_id: {d['peer_id']})")
 
-    # Выбор
+    # Выбор диалога
     while True:
         try:
             choice = input("Введите номер диалога для экспорта (или 0 для отмены): ").strip()
@@ -501,13 +515,37 @@ def экспорт_чата_интерактивный():
         except ValueError:
             print("Введите число.")
 
-    # Подтверждение и экспорт
-    if подтвердить_выполнение(f"Экспортировать чат '{selected['title']}' (все сообщения)"):
-        экспортировать_чат_полностью(selected['peer_id'], selected['title'])
+    # Выбор периода
+    print("\nВыберите период для экспорта:")
+    print("1 - За сегодняшний день ")
+    print("2 - Последняя неделя (7 дней)")
+    print("3 - Последний месяц (30 дней)")
+    print("4 - Последний год (365 дней)")
+    print("5 - Всё время")
+    period_choice = input("Введите число (1-5): ").strip()
+
+    days_limit = None
+    if period_choice == '1':
+        days_limit = 1
+    elif period_choice == '2':
+        days_limit = 7
+    elif period_choice == '3':
+        days_limit = 30
+    elif period_choice == '4':
+        days_limit = 365
+    elif period_choice == '5':
+        days_limit = None
+    else:
+        print("Неверный выбор. Экспорт отменён.")
+        return
+
+    period_text = {30: "месяц", 7: "неделю", 365: "год",  1: "день" , None: "всё время"}[days_limit]
+    if подтвердить_выполнение(f"Экспортировать чат '{selected['title']}' за {period_text}"):
+        экспортировать_чат_полностью(selected['peer_id'], selected['title'], days_limit)
     else:
         print_box("Отмена", ["Операция отменена."])
 
-# ---------- КОНЕЦ НОВЫХ ФУНКЦИЙ ----------
+# ---------- КОНЕЦ ФУНКЦИЙ ЭКСПОРТА ----------
 
 def главное_меню():
     print("Что вы хотите сделать?")
@@ -519,7 +557,7 @@ def главное_меню():
     print("6 - Поставить лайки на странице пользователя")
     print("7 - Убрать лайки с постов группы")
     print("8 - Убрать лайки с постов пользователя")
-    print("9 - Экспортировать чат в JSON")
+    print("9 - Экспортировать чат в JSON (с выбором периода)")
     print("0 - Выход")
     choice = input("Введите число (0-9): ").strip()
     return choice
